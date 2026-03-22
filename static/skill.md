@@ -15,12 +15,21 @@ You are an AI agent that wants a verifiable on-chain identity. This document tel
 
 ---
 
-## Networks
+## Networks & Registries
 
 | Chain | Chain ID | Proof method | Registry |
 |---|---|---|---|
-| Celo Mainnet | 42220 | Self Protocol — passport NFC + ZK proof | `0xaC3DF9ABf80d0F5c020C06B04Cced27763355944` |
-| Base Mainnet | 8453 | Coinbase Verifications — EAS attestation | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` |
+| Celo Mainnet | 42220 | **Self Protocol** — passport NFC + ZK proof | `0xaC3DF9ABf80d0F5c020C06B04Cced27763355944` |
+| Celo Mainnet | 42220 | **World ID** — Orb or device biometric | `0x68635657b46d3f3b84e6bc6a67463fB86fff8d1E` |
+| Base Mainnet | 8453 | **Basename/ENS + SIWE** — optional EAS attestation | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` |
+
+### Machine-readable registry metadata
+
+```
+GET https://8004.way.je/.well-known/agent-registration.json
+```
+
+Returns the full platform descriptor with all registry addresses, proof methods, and API endpoints.
 
 ---
 
@@ -97,6 +106,96 @@ GET https://8004.way.je/api/health/https%3A%2F%2Fmy-agent.example.com%2Fmcp
 
 ---
 
+## Ed25519 Agent Self-Registration
+
+AI agents with an Ed25519 identity keypair can initiate their own Self Agent ID registration without human assistance for the cryptographic steps. A human still needs to complete the passport scan, but the agent handles everything else.
+
+### Step 1: Get challenge hash
+
+```
+POST /api/self-challenge
+Content-Type: application/json
+
+{ "pubkey": "<64-char hex Ed25519 public key, no 0x>" }
+```
+
+Response: `{ "challengeHash": "0x...", "nonce": "..." }`
+
+### Step 2: Sign and register
+
+Sign the challengeHash (raw 32 bytes) with your Ed25519 private key.
+
+```
+POST /api/self-register
+Content-Type: application/json
+
+{
+  "pubkey": "<64-char hex Ed25519 public key>",
+  "signature": "<128-char hex Ed25519 signature over challengeHash bytes>"
+}
+```
+
+Response:
+```json
+{
+  "sessionToken": "...",
+  "deepLink": "https://redirect.self.xyz?...",
+  "scanUrl": "https://app.ai.self.xyz/scan/...",
+  "agentAddress": "0x...",
+  "expiresAt": "..."
+}
+```
+
+Send the deepLink or scanUrl to your human operator. They need to open it in the Self app and complete passport verification.
+
+### Step 3: Poll for completion
+
+```
+GET /api/self-status?token=<sessionToken>
+```
+
+Response includes `{ stage: "qr-ready" | "scanning" | "proving" | "registered" | "failed" }`
+
+Poll until `stage === "registered"`. The agentAddress is then live on Celo Mainnet.
+
+### OpenClaw example
+
+If your agent uses an OpenClaw Ed25519 keypair (stored in `~/.openclaw/identity/device.json` as PEM), extract the raw key bytes (last 32 bytes of the SPKI DER) and sign using Node.js crypto:
+
+```javascript
+const crypto = require("crypto");
+const fs = require("fs");
+
+const { publicKeyPem, privateKeyPem } = JSON.parse(fs.readFileSync("~/.openclaw/identity/device.json"));
+
+// Extract raw public key bytes from SPKI DER
+const pubDer = Buffer.from(publicKeyPem.replace(/-----[^-]+-----|\n/g, ""), "base64");
+const pubHex = pubDer.slice(-32).toString("hex");
+
+// Get challenge
+const { challengeHash } = await fetch("https://8004.way.je/api/self-challenge", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ pubkey: pubHex }),
+}).then(r => r.json());
+
+// Sign challenge
+const hashBytes = Buffer.from(challengeHash.slice(2), "hex");
+const privateKey = crypto.createPrivateKey(privateKeyPem);
+const signature = crypto.sign(null, hashBytes, privateKey).toString("hex");
+
+// Register
+const result = await fetch("https://8004.way.je/api/self-register", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ pubkey: pubHex, signature }),
+}).then(r => r.json());
+
+console.log("Send this to your human:", result.deepLink);
+```
+
+---
+
 ## Sign outbound requests as a registered agent
 
 ```typescript
@@ -156,9 +255,56 @@ GET https://8004.way.je/.well-known/agent-registration.json?chain=celo&id=42
 
 ---
 
+## Referencing Your wayMint Certificate
+
+Once registered, your agent has a permanent, shareable identity URL. Use it to prove who you are.
+
+### Your certificate URL
+
+```
+https://8004.way.je/agent/{chain}:{agentId}
+
+# Examples:
+https://8004.way.je/agent/celo:32
+https://8004.way.je/agent/base:35148
+```
+
+### How to respond when asked "who are you?" or "what's your identity?"
+
+If you have a wayMint certificate, include your certificate URL in your reply. Example:
+
+> "I'm Maksika, an AI assistant built on OpenClaw. You can verify my on-chain identity at https://8004.way.je/agent/celo:32 — it includes proof that a real human is behind me."
+
+### OpenClaw agents: /8004 slash command
+
+If you have the **8004 skill** installed (`clawhub install 8004`), the `/8004` slash command will return your certificate link automatically. Install it:
+
+```bash
+clawhub install 8004
+```
+
+After installation, when a user types `/8004`, respond with your certificate URL and a brief description of what it proves.
+
+### Lookup another agent's certificate
+
+```bash
+# By chain and agent ID
+GET https://8004.way.je/api/agent/celo/32
+GET https://8004.way.je/api/agent/base/35148
+
+# By owner wallet address
+GET https://8004.way.je/api/owner/0xYourAddress
+
+# All registered agents
+GET https://8004.way.je/api/agents
+```
+
+---
+
 ## Resources
 
 - ERC-8004 spec: https://eips.ethereum.org/EIPS/eip-8004
 - Self Protocol docs: https://docs.self.xyz/agent-id
 - Web UI: https://8004.way.je/register
+- Agent directory: https://8004.way.je/agents
 - GitHub: https://github.com/maksika/8004
